@@ -2,6 +2,11 @@
 
 Auto-approves permission prompts from coding agents on macOS.
 
+> **Read this before running it.** This tool presses "Allow" on prompts that
+> exist to protect you. It grants an agent permission to run commands you did
+> not individually approve. Use it on work you can afford to lose, in a
+> directory under version control, and start with `--dry-run`.
+
 There are two completely different kinds of prompt, and they need two different
 mechanisms:
 
@@ -114,6 +119,24 @@ prompt is left for a human no matter what the policy says.
 dangerously-allow watch agent --never-approve 'rm -rf' --never-approve 'push --force'
 ```
 
+## What it will not do
+
+Worth checking for yourself before you trust a tool that clicks "Allow" — every
+claim here is one grep away in `Sources/DangerouslyAllowCore/`:
+
+- It never selects a refusal or a neutral option. The target is drawn only from
+  `AllowPolicy.preference`, which contains grant kinds and nothing else.
+- It never types an option's digit, so it cannot confirm a menu by accident.
+- If it cannot see which row is highlighted, it refuses to act and says so.
+- Under the default `session` policy it grants nothing that outlives the agent
+  process — no "don't ask again", no "all future sessions", no folder trust.
+- In `run`/`watch` it reads and writes exactly one tmux pane: the one you name.
+- No network, no telemetry, no config file. The only file it writes is the
+  watcher log: `--log <file>`, or a temp file whose path `run` prints on startup.
+
+The `gui` mode is the exception to the last two points: it needs `sudo`, and it
+scans the Accessibility tree of every running app to find TCC dialogs.
+
 ## A safer alternative first
 
 If you want to auto-approve *everything*, the agent's own flag is safer than
@@ -148,3 +171,19 @@ Labels and rendering were taken from the shipped harnesses, not guessed —
 Gemini CLI's `ToolConfirmationMessage.js` / `BaseSelectionList.js`, and the
 string table of the Claude Code binary. `RealCaptureTests.swift` pins verbatim
 `capture-pane` output as a fixture.
+
+## Contributing
+
+Prompt wording changes as agents ship new versions. If `dangerously-allow`
+mis-reads a menu, run `dangerously-allow watch <session> --verbose --dry-run`,
+and paste the parsed menu into an issue along with the raw
+`tmux capture-pane -p -t <session>` output. New harnesses are usually just a few
+labels in `OptionClassifier` plus a fixture in `RealCaptureTests`.
+
+`make check` must stay green: 35 unit tests, and 12 end-to-end tests that drive a
+mock TUI through a real tmux pane.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
