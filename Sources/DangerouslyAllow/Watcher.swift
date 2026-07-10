@@ -12,6 +12,10 @@ struct WatchOptions {
     var neverApprove: [String] = []
     var requireTrigger = true
     var verbose = false
+    /// When set, unrecognised menus are sent to this model to label. nil = off.
+    var llmModel: String?
+    /// Post a macOS notification when the fallback leaves a prompt for a human.
+    var notify = false
 }
 
 /// Polls a tmux pane, and when a permission menu appears, walks the cursor onto
@@ -32,10 +36,22 @@ final class Watcher {
     /// re-confirming a menu that lingers for a frame, while still allowing an
     /// identical prompt to be approved again later.
     private var handled: String?
+    /// Built once when `--llm-fallback` is set and credentials are present.
+    private let adjudicator: NetworkAdjudicator?
 
     init(options: WatchOptions) throws {
         self.opts = options
         self.channel = try TmuxChannel(target: options.target)
+        if let model = options.llmModel {
+            if let a = NetworkAdjudicator(model: model) {
+                self.adjudicator = a
+            } else {
+                Log.warn("--llm-fallback set but no credentials — set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN. Fallback disabled.")
+                self.adjudicator = nil
+            }
+        } else {
+            self.adjudicator = nil
+        }
     }
 
     func run() {
@@ -43,6 +59,9 @@ final class Watcher {
         Log.info("policy: \(opts.policy.rawValue)\(opts.dryRun ? "  (DRY RUN — no keys sent)" : "")")
         if !opts.neverApprove.isEmpty {
             Log.info("never-approve: \(opts.neverApprove.joined(separator: ", "))")
+        }
+        if let adjudicator {
+            Log.info("llm fallback: \(adjudicator.model) will label menus the rules miss")
         }
 
         while true {
@@ -61,6 +80,21 @@ final class Watcher {
                         if handle(prompt: prompt, screen: screen), opts.stopAfterFirst {
                             return
                         }
+                    }
+                } else if let adjudicator {
+                    // Rules did not recognise the screen. If it still looks like a
+                    // menu, ask the model to label it — once per distinct menu.
+                    let scan = MenuScan.scan(screen)
+                    if scan.rows.count >= 2 {
+                        let fingerprint = MenuScan.fingerprint(scan.rows)
+                        if handled != fingerprint {
+                            let confirmed = adjudicate(
+                                screen: screen, fingerprint: fingerprint, adjudicator: adjudicator
+                            )
+                            if confirmed, opts.stopAfterFirst { return }
+                        }
+                    } else {
+                        handled = nil
                     }
                 } else {
                     handled = nil
@@ -146,5 +180,81 @@ final class Watcher {
         Log.warn("gave up after \(opts.maxNavSteps) navigation steps")
         handled = prompt.fingerprint
         return false
+    }
+
+    // MARK: - LLM fallback
+
+    /// Ask the model to label an unrecognised menu, then act on the reconciled
+    /// verdict. Marks the menu handled in every outcome, so a lingering prompt
+    /// costs at most one API call. Returns true only when a row was confirmed.
+    private func adjudicate(
+        screen: String, fingerprint: String, adjudicator: NetworkAdjudicator
+    ) -> Bool {
+        handled = fingerprint
+
+        // Veto before spending an API call — never send a blocked pane out, and
+        // never act on one.
+        if let blocked = PromptDetector.blockingPattern(screen: screen, neverApprove: opts.neverApprove) {
+            Log.warn("LLM fallback: REFUSING — screen matches --never-approve /\(blocked)/")
+            return false
+        }
+
+        Log.info("LLM fallback: unrecognised menu — asking \(adjudicator.model) to label it")
+        switch AdjudicatedDetector.detect(screen: screen, policy: opts.policy, adjudicator: adjudicator) {
+        case .notAMenu:
+            return false
+        case let .deferToHuman(reason):
+            Log.warn("LLM fallback: leaving for a human — \(reason)")
+            notify("Unrecognised prompt: \(reason)")
+            return false
+        case let .act(number, label, kind):
+            Log.info("LLM fallback: choosing #\(number) \"\(label)\" [\(kind.rawValue)]")
+            if opts.dryRun {
+                Log.info("  [dry-run] would navigate to option \(number) and confirm")
+                return false
+            }
+            if navigateAdjudicated(targetNumber: number, fingerprint: fingerprint) {
+                Log.info("  confirmed \"\(label)\"")
+                return true
+            }
+            Log.warn("  LLM navigation failed")
+            return false
+        }
+    }
+
+    /// The same closed-loop navigation as the rule-based path — one arrow key,
+    /// re-capture, re-read the cursor — driven by the option number the policy
+    /// picked from the reconciled labels. Aborts if the menu changes underneath.
+    private func navigateAdjudicated(targetNumber: Int, fingerprint: String) -> Bool {
+        for _ in 0..<opts.maxNavSteps {
+            guard let screen = try? channel.capturePane(),
+                  let state = MenuScan.navigationState(for: screen, targetNumber: targetNumber),
+                  state.fingerprint == fingerprint
+            else {
+                Log.warn("  menu changed mid-navigation — aborting")
+                return false
+            }
+            guard let cursor = state.cursorIndex, let target = state.targetIndex else {
+                Log.warn("  lost the cursor mid-navigation — aborting")
+                return false
+            }
+            let move = PromptDetector.nextStep(cursor: cursor, target: target)
+            do {
+                try channel.sendKeys([move.tmuxKey])
+            } catch {
+                Log.error("  send-keys failed: \(error)")
+                return false
+            }
+            if move == .confirm { return true }
+            Thread.sleep(forTimeInterval: opts.navDelay)
+        }
+        Log.warn("  gave up after \(opts.maxNavSteps) navigation steps")
+        return false
+    }
+
+    /// Post a macOS notification (only with --notify).
+    private func notify(_ message: String) {
+        guard opts.notify else { return }
+        Notify.post(message)
     }
 }

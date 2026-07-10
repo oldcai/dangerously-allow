@@ -7,6 +7,8 @@ dangerously-allow — auto-approve permission prompts from coding agents on macO
 USAGE
   dangerously-allow run [options] <command>       launch an agent in tmux, watcher attached
   dangerously-allow watch <tmux-target> [options] watch an agent already running in tmux
+  dangerously-allow app <name> [options]          approval cards in a native app (e.g. ChatGPT)
+  dangerously-allow notifications [options]       Allow-style actions on notification banners
   dangerously-allow gui [--dry-run]               native macOS TCC dialogs (needs sudo)
 
 OPTIONS (run + watch)
@@ -14,6 +16,9 @@ OPTIONS (run + watch)
   --never-approve <regex>        refuse if the pane matches  (repeatable)
   --dry-run                      log the plan, send no keys
   --verbose                      print the parsed menu
+  --llm-fallback                 ask an LLM to label menus the rules miss
+  --llm-model <id>               fallback model      (default: claude-haiku-4-5)
+  --notify                       macOS notification when left for a human
 
 OPTIONS (watch only)
   --once                         exit after the first approval
@@ -21,10 +26,31 @@ OPTIONS (watch only)
   --nav-delay <ms>               pause between arrow keys    (default: 80)
   --no-require-trigger           match menus with no question line above
 
+LLM FALLBACK
+  Only runs when the rule-based classifier does not recognise a menu. The model
+  labels each row (it never picks one); its labels are reconciled with the rule
+  engine's, most-reluctant-wins, and the policy then selects the target. The
+  policy ceiling and --never-approve veto still apply, and it defers to a human
+  when the model, the rules, or the policy disagree. Needs ANTHROPIC_API_KEY (or
+  ANTHROPIC_AUTH_TOKEN) in the environment.
+
 OPTIONS (run only)
   --name <name>                  tmux session name           (default: da-<pid>)
   --log <file>                   watcher log destination
   --no-attach                    leave the session detached
+
+OPTIONS (app + notifications)
+  --policy / --never-approve / --dry-run / --verbose / --notify / --once /
+  --poll / --no-require-trigger  as above
+  --dump                         print the app's pruned AX tree once and exit
+
+  `app <name>` matches a running app by name or bundle id and presses the
+  option the policy allows on approval cards it shows — e.g. the ChatGPT
+  desktop app's "Allow once / Always allow / Deny". `notifications` does the
+  same for action buttons on macOS notification banners. Both need this
+  terminal to have Accessibility permission (System Settings → Privacy &
+  Security → Accessibility) — no sudo. A card only counts when it offers both
+  a grant and a refusal, like the TUI path.
 
 POLICY
   once     click "Yes" / "Allow once"
@@ -62,6 +88,12 @@ struct CLI {
         case "watch":
             args.removeFirst()
             runWatch(args)
+        case "app":
+            args.removeFirst()
+            runApp(args)
+        case "notifications":
+            args.removeFirst()
+            runNotifications(args)
         case "run":
             args.removeFirst()
             exit(runRun(args))
@@ -113,6 +145,9 @@ struct CLI {
             case "--never-approve": opts.neverApprove.append(take(args, &i, "--never-approve"))
             case "--poll": opts.pollInterval = (Double(take(args, &i, "--poll")) ?? 400) / 1000
             case "--nav-delay": opts.navDelay = (Double(take(args, &i, "--nav-delay")) ?? 80) / 1000
+            case "--llm-fallback": opts.llmModel = opts.llmModel ?? "claude-haiku-4-5"
+            case "--llm-model": opts.llmModel = take(args, &i, "--llm-model")
+            case "--notify": opts.notify = true
             default:
                 Log.error("unknown option '\(args[i])'")
                 exit(2)
@@ -134,6 +169,52 @@ struct CLI {
         }
     }
 
+    // MARK: - app / notifications
+
+    private static func runApp(_ args: [String]) {
+        guard let name = args.first, !name.hasPrefix("-") else {
+            Log.error("app requires an app name or bundle id, e.g. `dangerously-allow app ChatGPT`")
+            exit(2)
+        }
+        watchApp(AppWatchOptions(appName: name), Array(args.dropFirst()))
+    }
+
+    private static func runNotifications(_ args: [String]) {
+        // Notification banners live in Notification Center's process, and their
+        // buttons are AX actions on the banner element — AppWatcher knows how.
+        watchApp(AppWatchOptions(appName: "com.apple.notificationcenterui"), args)
+    }
+
+    private static func watchApp(_ base: AppWatchOptions, _ args: [String]) {
+        var opts = base
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--policy": opts.policy = parsePolicy(take(args, &i, "--policy"))
+            case "--dry-run": opts.dryRun = true
+            case "--once": opts.stopAfterFirst = true
+            case "--verbose", "-v": opts.verbose = true
+            case "--no-require-trigger": opts.requireTrigger = false
+            case "--never-approve": opts.neverApprove.append(take(args, &i, "--never-approve"))
+            case "--poll": opts.pollInterval = (Double(take(args, &i, "--poll")) ?? 500) / 1000
+            case "--notify": opts.notify = true
+            case "--dump": opts.dump = true
+            default:
+                Log.error("unknown option '\(args[i])'")
+                exit(2)
+            }
+            i += 1
+        }
+
+        signal(SIGINT) { _ in
+            Log.plain("")
+            Log.info("stopped")
+            exit(0)
+        }
+
+        AppWatcher(options: opts).run()
+    }
+
     // MARK: - run
 
     private static func runRun(_ args: [String]) -> Int32 {
@@ -152,6 +233,9 @@ struct CLI {
                 opts.watchArgs += ["--never-approve", take(args, &i, "--never-approve")]
             case "--dry-run": opts.watchArgs.append("--dry-run")
             case "--verbose": opts.watchArgs.append("--verbose")
+            case "--llm-fallback": opts.watchArgs.append("--llm-fallback")
+            case "--llm-model": opts.watchArgs += ["--llm-model", take(args, &i, "--llm-model")]
+            case "--notify": opts.watchArgs.append("--notify")
             case "--":
                 i += 1
                 break loop

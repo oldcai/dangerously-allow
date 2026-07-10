@@ -30,6 +30,65 @@ final class OptionClassifierTests: XCTestCase {
         XCTAssertEqual(OptionClassifier.classify("Deny, and tell Claude what to do differently"), .deny)
     }
 
+    /// The ChatGPT desktop app's (com.openai.codex) approval card. Labels come
+    /// from the app bundle's string table (`approvalRequestCard.*`,
+    /// `avatarOverlay.waitingRequest.*` in app.asar).
+    func testChatGPTDesktopLabels() {
+        XCTAssertEqual(OptionClassifier.classify("Allow once"), .allowOnce)
+        XCTAssertEqual(OptionClassifier.classify("Always allow"), .allowAlways)
+        XCTAssertEqual(OptionClassifier.classify("Allow this conversation"), .allowSession)
+        XCTAssertEqual(OptionClassifier.classify("Deny"), .deny)
+        XCTAssertEqual(OptionClassifier.classify("Decline"), .deny)
+        XCTAssertEqual(OptionClassifier.classify("Cancel"), .deny)
+        // Leading persistence word must not hide a refusal or invent a grant.
+        XCTAssertEqual(OptionClassifier.classify("Never allow"), .deny)
+        XCTAssertEqual(OptionClassifier.classify("Always deny"), .deny)
+        XCTAssertEqual(OptionClassifier.classify("Always on top"), .neutral)
+    }
+
+    /// Folder trust is a permanent grant however it is worded — including Claude
+    /// Code's affirmative "Yes, I trust this folder", which must not fall through
+    /// to a one-time allow just because it starts with "Yes".
+    func testFolderTrustIsAlwaysPermanent() {
+        XCTAssertEqual(OptionClassifier.classify("Yes, I trust this folder"), .allowAlways)
+        XCTAssertEqual(OptionClassifier.classify("Trust folder (dangerously_allow)"), .allowAlways)
+        XCTAssertEqual(OptionClassifier.classify("Trust parent folder (projects)"), .allowAlways)
+        // ...but a refusal that merely mentions trust stays a refusal.
+        XCTAssertEqual(OptionClassifier.classify("No, don't trust this folder"), .deny)
+        XCTAssertEqual(OptionClassifier.classify("Don't trust"), .deny)
+    }
+
+    /// A refusal that names a trust phrase must never become a grant. The trust
+    /// phrases are substrings, so they match inside "Do not trust this folder"
+    /// too — only an affirmative row may be read as folder trust.
+    func testNegatedTrustIsNeverAGrant() {
+        for label in ["Do not trust this folder", "Exit (do not trust this folder)"] {
+            XCTAssertNotEqual(
+                OptionClassifier.classify(label), .allowAlways,
+                "\"\(label)\" refuses; it must not be classified as a permanent grant"
+            )
+            XCTAssertFalse(
+                OptionClassifier.classify(label).grantsAccess,
+                "\"\(label)\" refuses; it must not grant access"
+            )
+        }
+    }
+
+    /// macOS and many TUIs render the apostrophe as U+2019. Folding it to ASCII
+    /// keeps "don’t ask again" a permanent grant — otherwise it falls through to
+    /// `.allowOnce` and the default `session` policy clicks it, which is exactly
+    /// the grant this tool promises never to make.
+    func testTypographicApostropheIsReadLikeAnASCIIOne() {
+        XCTAssertEqual(OptionClassifier.classify("Yes, and don\u{2019}t ask again"), .allowAlways)
+        XCTAssertEqual(
+            OptionClassifier.classify("Yes, and don\u{2019}t ask again for npm commands"),
+            .allowAlways
+        )
+        // Apple spells its refusal button with a typographic apostrophe.
+        XCTAssertEqual(OptionClassifier.classify("Don\u{2019}t Allow"), .deny)
+        XCTAssertEqual(OptionClassifier.classify("Don\u{2019}t trust this folder"), .deny)
+    }
+
     /// "this session" must win over "don't ask again" — the grant expires with
     /// the process, so it is a session grant, not a permanent one.
     func testSessionBeatsAlwaysWhenBothPhrasesPresent() {
