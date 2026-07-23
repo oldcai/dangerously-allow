@@ -9,7 +9,7 @@ USAGE
   dangerously-allow watch <tmux-target> [options] watch an agent already running in tmux
   dangerously-allow app <name> [options]          approval cards in a native app (e.g. ChatGPT)
   dangerously-allow notifications [options]       Allow-style actions on notification banners
-  dangerously-allow gui [--dry-run]               native macOS TCC dialogs (needs sudo)
+  dangerously-allow gui [options]                 native macOS TCC dialogs (needs sudo)
 
 OPTIONS (run + watch)
   --policy once|session|always   which grant to click        (default: session)
@@ -52,6 +52,22 @@ OPTIONS (app + notifications)
   Security → Accessibility) — no sudo. A card only counts when it offers both
   a grant and a refusal, like the TUI path.
 
+OPTIONS (gui)
+  --policy / --never-approve / --dry-run / --verbose / --dump / --notify /
+  --once / --poll / --no-require-trigger  as above  (--policy default: always)
+
+  A native permission dialog is answered into the TCC database, so its grant
+  outlives the process: a plain "Allow" is a *permanent* grant however mildly
+  it is worded. gui defaults to --policy always and presses it, because a TCC
+  dialog almost never offers a session- or once-scoped button — a session
+  default would leave the common dialogs untouched. Refusals and neutral
+  buttons ("Open System Settings") are never pressed under any policy; pass
+  --policy session to press only an explicit "Allow Once". Unlike a card, a
+  system dialog need not offer a refusal — macOS 15's screen-capture prompt
+  offers "Allow" and "Open System Settings", and the way out is Esc — so the
+  gate is the dialog's wording plus the policy ceiling. Run --verbose to see
+  the dialogs it passed over and why.
+
 POLICY
   once     click "Yes" / "Allow once"
   session  click "Allow for this session"; falls back to a one-time allow
@@ -84,7 +100,7 @@ struct CLI {
             Log.plain("dangerously-allow 0.2.0")
         case "gui":
             args.removeFirst()
-            AXScanner.run(dryRun: args.contains("--dry-run"), pollInterval: 0.5)
+            runGui(args)
         case "watch":
             args.removeFirst()
             runWatch(args)
@@ -167,6 +183,38 @@ struct CLI {
             Log.error("\(error)")
             exit(1)
         }
+    }
+
+    // MARK: - gui
+
+    private static func runGui(_ args: [String]) {
+        var opts = GuiWatchOptions()
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--policy": opts.policy = parsePolicy(take(args, &i, "--policy"))
+            case "--dry-run": opts.dryRun = true
+            case "--once": opts.stopAfterFirst = true
+            case "--verbose", "-v": opts.verbose = true
+            case "--dump": opts.dump = true
+            case "--no-require-trigger": opts.requireTrigger = false
+            case "--never-approve": opts.neverApprove.append(take(args, &i, "--never-approve"))
+            case "--poll": opts.pollInterval = (Double(take(args, &i, "--poll")) ?? 500) / 1000
+            case "--notify": opts.notify = true
+            default:
+                Log.error("unknown option '\(args[i])'")
+                exit(2)
+            }
+            i += 1
+        }
+
+        signal(SIGINT) { _ in
+            Log.plain("")
+            Log.info("stopped")
+            exit(0)
+        }
+
+        AXScanner.run(options: opts)
     }
 
     // MARK: - app / notifications
