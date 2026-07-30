@@ -95,6 +95,49 @@ final class SystemDialogDetectorTests: XCTestCase {
         XCTAssertEqual(detect(settingsFirst, policy: .always)?.target?.label, "Allow")
     }
 
+    /// Apple Events (Automation). The sentence is built from a different verb
+    /// frame than every other TCC dialog — "wants access to control", not
+    /// "wants to access" — and it names no service, so the keyword list walked
+    /// past it and the dialog sat there waiting for a human.
+    private func automationDialog() -> UINode {
+        win([
+            txt("\u{201C}ChatGPT\u{201D} wants access to control \u{201C}FastMD\u{201D}. Allowing "
+                + "control will provide access to documents and data in \u{201C}FastMD\u{201D}, "
+                + "and to perform actions within that app."),
+            txt("ChatGPT uses Apple Events to control Mac apps on your behalf"),
+            btn("Don\u{2019}t Allow"),
+            btn("Allow"),
+        ])
+    }
+
+    func testRecognisesTheAppleEventsDialog() {
+        let d = detect(automationDialog())
+        XCTAssertNotNil(d, "the Automation dialog's wording must be recognised")
+        XCTAssertEqual(d?.options.map(\.label), ["Don\u{2019}t Allow", "Allow"])
+    }
+
+    func testAppleEventsGrantIsPermanentAndOnlyAlwaysPressesIt() {
+        XCTAssertNil(detect(automationDialog())?.target, "controlling another app is permanent")
+        XCTAssertEqual(detect(automationDialog(), policy: .always)?.target?.label, "Allow")
+    }
+
+    /// Two more dialogs built from verb frames the list did not cover.
+    func testRecognisesLocalNetworkAndNotificationDialogs() {
+        let localNetwork = win([
+            txt("\u{201C}Terminal\u{201D} would like to find and connect to devices on your "
+                + "local network."),
+            btn("Don\u{2019}t Allow"), btn("Allow"),
+        ])
+        XCTAssertEqual(detect(localNetwork, policy: .always)?.target?.label, "Allow")
+
+        let notifications = win([
+            txt("\u{201C}Claude\u{201D} Would Like to Send You Notifications"),
+            txt("Notifications may include alerts, sounds and icon badges."),
+            btn("Don\u{2019}t Allow"), btn("Allow"),
+        ])
+        XCTAssertEqual(detect(notifications, policy: .always)?.target?.label, "Allow")
+    }
+
     // MARK: - classification
 
     func testEveryUnqualifiedGrantIsPermanent() {

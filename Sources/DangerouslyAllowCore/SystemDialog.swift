@@ -63,13 +63,20 @@ public enum SystemDialogDetector {
         // The classic TCC sentence, unchanged for a decade.
         "would like to access", "would like to use",
         "would like to record", "would like to control",
-        "wants to access", "wants to use",
+        "wants to access", "wants to use", "wants to control",
+        // Apple Events (Automation), which builds its sentence from a different
+        // verb frame and names no service: "“ChatGPT” wants access to control
+        // “FastMD”. Allowing control will provide access to documents and data
+        // in “FastMD”, and to perform actions within that app."
+        "wants access to", "allowing control will",
         // macOS 15 / ScreenCaptureKit, which names neither a verb from the list
         // above nor a service: "…is requesting to bypass the system private
         // window picker and directly access your screen and audio."
         "is requesting to", "is requesting access", "requests access to",
         "private window picker",
         "access your screen", "record your screen", "system audio",
+        // Two more that lead with a verb the frames above do not cover.
+        "devices on your local network", "send you notifications",
         // Dialogs that lead with the service name instead of a sentence.
         "microphone", "camera", "screen recording", "accessibility",
         "speech recognition", "input monitoring", "full disk access",
