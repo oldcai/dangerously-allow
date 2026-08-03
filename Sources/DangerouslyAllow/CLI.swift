@@ -2,14 +2,49 @@ import DangerouslyAllowCore
 import Foundation
 
 private let usage = """
-dangerously-allow — auto-approve permission prompts from coding agents on macOS
+dangerously-allow — auto-approve the permission prompts the Claude and ChatGPT
+desktop apps put in your way, on macOS
 
 USAGE
+  dangerously-allow [options]                     watch the whole desktop
+
+  With no arguments it answers all of it, in one process: the approval cards
+  inside the ChatGPT and Claude desktop apps, Allow-style actions on
+  notification banners, and the native macOS permission dialogs they trigger on
+  the way to controlling your machine ("ChatGPT wants access to control X").
+  Needs this terminal to have Accessibility permission (System Settings →
+  Privacy & Security → Accessibility). No sudo.
+
+OPTIONS
+  --policy once|session|always   which grant to click  (default: session for
+                                 cards, always for system dialogs — see POLICY)
+  --app <name>                   also answer cards in this app  (repeatable;
+                                 a localized name or a bundle id)
+  --never-approve <regex>        refuse if the prompt matches   (repeatable)
+  --dry-run                      log the plan, press nothing
+  --verbose                      print every option and the tier it was given
+  --once                         exit after the first approval
+  --poll <ms>                    scan interval                  (default: 500)
+  --no-require-trigger           match prompts whose wording is not recognised
+  --notify                       macOS notification when left for a human
+
+ONE CHANNEL AT A TIME
+  dangerously-allow gui [options]                 native macOS permission dialogs
+  dangerously-allow app <name> [options]          approval cards in one app
+  dangerously-allow notifications [options]       notification banners only
+
+  The desktop mode's three channels, separately — mostly useful with --dump,
+  which prints an app's pruned AX tree so an unrecognised prompt can be pasted
+  into an issue verbatim.
+
+TERMINAL AGENTS (secondary)
   dangerously-allow run [options] <command>       launch an agent in tmux, watcher attached
   dangerously-allow watch <tmux-target> [options] watch an agent already running in tmux
-  dangerously-allow app <name> [options]          approval cards in a native app (e.g. ChatGPT)
-  dangerously-allow notifications [options]       Allow-style actions on notification banners
-  dangerously-allow gui [options]                 native macOS TCC dialogs (needs sudo)
+
+  A CLI agent can usually just be told to allow everything
+  (`claude --dangerously-skip-permissions`), so this is for the cases where it
+  cannot be: the watcher reads the TUI menu out of a tmux pane and drives it
+  with arrow keys.
 
 OPTIONS (run + watch)
   --policy once|session|always   which grant to click        (default: session)
@@ -76,28 +111,39 @@ POLICY
   A policy never escalates: --policy session will not click an
   "all future sessions" option just because no session option exists.
 
+  The two desktop channels start from different defaults because the same word
+  means different things in each. "Allow once" on an in-app card really is
+  one-shot, so cards default to session. "Allow" on a system dialog is written
+  to the TCC database and outlives the process — it is a permanent grant however
+  mildly it is worded — so system dialogs are pressed only under always, which
+  is their default because they almost never offer anything narrower. Passing
+  --policy sets both: --policy session stops answering system dialogs
+  altogether unless one offers an explicit "Allow Once".
+
 EXAMPLES
-  dangerously-allow run claude
-  dangerously-allow run --policy always codex
-  dangerously-allow run --never-approve 'rm -rf' --never-approve 'push --force' gemini
-  dangerously-allow run --dry-run claude          # watch and log, press nothing
-  dangerously-allow watch my-session --verbose    # attach to a running agent
+  dangerously-allow                               # the usual: watch everything
+  dangerously-allow --dry-run --verbose           # see what it would press
+  dangerously-allow --never-approve 'rm -rf' --never-approve 'Full Disk Access'
+  dangerously-allow --app Cursor                  # answer another app's cards too
+  dangerously-allow app ChatGPT --dump            # print one app's AX tree
+  dangerously-allow run claude                    # secondary: a TUI agent in tmux
 """
 
 @main
 struct CLI {
     static func main() {
         var args = Array(CommandLine.arguments.dropFirst())
+        // No arguments is the point of the tool: start watching everything.
         guard let subcommand = args.first else {
-            Log.plain(usage)
-            exit(0)
+            runDesktop([])
+            return
         }
 
         switch subcommand {
         case "-h", "--help", "help":
             Log.plain(usage)
         case "-v", "--version":
-            Log.plain("dangerously-allow 0.2.0")
+            Log.plain("dangerously-allow 0.3.0")
         case "gui":
             args.removeFirst()
             runGui(args)
@@ -113,14 +159,54 @@ struct CLI {
         case "run":
             args.removeFirst()
             exit(runRun(args))
-        // Back-compat: the original tool took no subcommand and scanned GUI dialogs.
-        case "--dry-run":
-            AXScanner.run(dryRun: true, pollInterval: 0.5)
         default:
-            Log.error("unknown subcommand '\(subcommand)'")
-            Log.plain(usage)
-            exit(2)
+            // A leading flag means the desktop mode with options, not a typo:
+            // `dangerously-allow --dry-run` has always started watching.
+            guard subcommand.hasPrefix("-") else {
+                Log.error("unknown subcommand '\(subcommand)'")
+                Log.plain(usage)
+                exit(2)
+            }
+            runDesktop(args)
         }
+    }
+
+    // MARK: - desktop (the default)
+
+    private static func runDesktop(_ args: [String]) {
+        var opts = DesktopOptions()
+        var extraApps: [String] = []
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--policy":
+                // One flag, both channels — see POLICY in the usage text for
+                // why they start from different defaults.
+                let policy = parsePolicy(take(args, &i, "--policy"))
+                opts.policies = DesktopPolicies(dialog: policy, card: policy)
+            case "--app": extraApps.append(take(args, &i, "--app"))
+            case "--dry-run": opts.dryRun = true
+            case "--once": opts.stopAfterFirst = true
+            case "--verbose", "-v": opts.verbose = true
+            case "--no-require-trigger": opts.requireTrigger = false
+            case "--never-approve": opts.neverApprove.append(take(args, &i, "--never-approve"))
+            case "--poll": opts.pollInterval = (Double(take(args, &i, "--poll")) ?? 500) / 1000
+            case "--notify": opts.notify = true
+            default:
+                Log.error("unknown option '\(args[i])'")
+                exit(2)
+            }
+            i += 1
+        }
+        opts.apps += extraApps
+
+        signal(SIGINT) { _ in
+            Log.plain("")
+            Log.info("stopped")
+            exit(0)
+        }
+
+        DesktopWatcher(options: opts).run()
     }
 
     /// Pull the value that follows `args[i]`, or exit with a usage error.

@@ -35,22 +35,7 @@ final class AppWatcher {
     /// screen — the same lingering-frame guard `Watcher` uses.
     private var handled: String?
 
-    /// How to press each node id handed to the detector. Rebuilt every scan.
-    private enum Pressable {
-        case button(AXUIElement)
-        case action(AXUIElement, name: String)
-    }
-    private var pressables: [Int: Pressable] = [:]
-    private var nextID = 0
-    private var nodeBudget = 0
-
-    /// Standard AX actions every element carries (AXPress, AXShowMenu,
-    /// AXScrollToVisible…). Only *custom* actions — notification buttons,
-    /// named like "Name:Close\nTarget:…" with the label in the description —
-    /// become pressables.
-    private static let standardActionPrefix = "AX"
-    private static let maxDepth = 40
-    private static let maxNodes = 30_000
+    private let tree = AXTree()
 
     init(options: AppWatchOptions) {
         self.opts = options
@@ -90,20 +75,15 @@ final class AppWatcher {
     private func scan(_ apps: [NSRunningApplication]) -> Bool {
         var sawHandled = false
         for app in apps {
-            let axApp = AXUIElementCreateApplication(app.processIdentifier)
-            guard let windows = axAttr(axApp, kAXWindowsAttribute) as? [AXUIElement] else { continue }
-            for window in windows {
-                pressables.removeAll()
-                nextID = 0
-                nodeBudget = Self.maxNodes
-                guard let tree = buildNode(window, depth: 0) else { continue }
+            for window in tree.windows(ofPID: app.processIdentifier) {
+                guard let root = tree.build(window, within: 1.5) else { continue }
                 if opts.dump {
                     Log.info("window of \(app.localizedName ?? "?"):")
-                    dump(tree, indent: 1)
+                    dump(root, indent: 1)
                     continue
                 }
                 guard let prompt = ButtonPromptDetector.detect(
-                    root: tree, policy: opts.policy, requireTrigger: opts.requireTrigger
+                    root: root, policy: opts.policy, requireTrigger: opts.requireTrigger
                 ) else { continue }
                 if prompt.fingerprint == handled {
                     sawHandled = true
@@ -151,16 +131,9 @@ final class AppWatcher {
             return false
         }
 
-        guard let pressable = pressables[target.id] else {
+        guard let err = tree.press(target.id) else {
             Log.error("  lost the element between scan and press — leaving it")
             return false
-        }
-        let err: AXError
-        switch pressable {
-        case let .button(el):
-            err = AXUIElementPerformAction(el, kAXPressAction as CFString)
-        case let .action(el, name):
-            err = AXUIElementPerformAction(el, name as CFString)
         }
         if err == .success {
             Log.info("  pressed \"\(target.label)\"")
@@ -168,54 +141,6 @@ final class AppWatcher {
         }
         Log.error("  press failed (AXError \(err.rawValue))")
         return false
-    }
-
-    // MARK: - AX tree -> UINode
-
-    private func buildNode(_ el: AXUIElement, depth: Int) -> UINode? {
-        guard depth < Self.maxDepth, nodeBudget > 0 else { return nil }
-        nodeBudget -= 1
-        nextID += 1
-        let id = nextID
-
-        let role = axAttr(el, kAXRoleAttribute) as? String ?? ""
-        let title = axAttr(el, kAXTitleAttribute) as? String ?? ""
-        let desc = axAttr(el, kAXDescriptionAttribute) as? String ?? ""
-        let label = title.isEmpty ? desc : title
-        let text = axAttr(el, kAXValueAttribute) as? String ?? ""
-
-        if role == (kAXButtonRole as String) {
-            // A leaf for the detector; nested renderer buttons collapse into it.
-            pressables[id] = .button(el)
-            return UINode(id: id, role: role, label: label, text: text)
-        }
-
-        var children: [UINode] = []
-        if let kids = axAttr(el, kAXChildrenAttribute) as? [AXUIElement] {
-            for kid in kids {
-                if let node = buildNode(kid, depth: depth + 1) { children.append(node) }
-            }
-        }
-        // Notification-banner buttons live here, as custom actions.
-        for (name, actionLabel) in customActions(el) {
-            nextID += 1
-            pressables[nextID] = .action(el, name: name)
-            children.append(UINode(id: nextID, role: "AXAction", label: actionLabel))
-        }
-        return UINode(id: id, role: role, label: label, text: text, children: children)
-    }
-
-    private func customActions(_ el: AXUIElement) -> [(name: String, label: String)] {
-        var namesRef: CFArray?
-        guard AXUIElementCopyActionNames(el, &namesRef) == .success,
-              let names = namesRef as? [String] else { return [] }
-        return names.compactMap { name in
-            guard !name.hasPrefix(Self.standardActionPrefix) else { return nil }
-            var descRef: CFString?
-            AXUIElementCopyActionDescription(el, name as CFString, &descRef)
-            guard let label = descRef as String?, !label.isEmpty else { return nil }
-            return (name, label)
-        }
     }
 
     private func matchingApps() -> [NSRunningApplication] {
@@ -235,7 +160,7 @@ final class AppWatcher {
 
     private func dump(_ node: UINode, indent: Int) {
         let hasWords = !node.label.isEmpty || !node.text.isEmpty
-        let pressable = pressables[node.id] != nil
+        let pressable = tree.isPressable(node.id)
         if hasWords || pressable {
             var line = String(repeating: "  ", count: indent) + node.role
             if !node.label.isEmpty { line += " \"\(node.label.prefix(80))\"" }
@@ -246,10 +171,5 @@ final class AppWatcher {
             Log.plain(line)
         }
         for child in node.children { dump(child, indent: indent + 1) }
-    }
-
-    private func axAttr(_ el: AXUIElement, _ attr: String) -> CFTypeRef? {
-        var val: CFTypeRef?
-        return AXUIElementCopyAttributeValue(el, attr as CFString, &val) == .success ? val : nil
     }
 }

@@ -46,6 +46,7 @@ enum AXScanner {
             Log.info("never-approve: \(options.neverApprove.joined(separator: ", "))")
         }
 
+        AXTree.capMessagingTimeout()
         if !AXIsProcessTrusted() {
             Log.warn("AXIsProcessTrusted() = false — re-run with sudo, or grant Accessibility")
         }
@@ -71,12 +72,7 @@ enum AXScanner {
         /// Windows already reported under --verbose, so a 2 Hz poll does not
         /// reprint the same unrecognised dialog forever.
         private var reported: Set<String> = []
-        private var buttons: [Int: AXUIElement] = [:]
-        private var nextID = 0
-        private var nodeBudget = 0
-
-        private static let maxDepth = 40
-        private static let maxNodes = 20_000
+        private let tree = AXTree()
 
         init(options: GuiWatchOptions) {
             self.opts = options
@@ -87,21 +83,21 @@ enum AXScanner {
         func pass() -> Bool {
             var sawHandled = false
             for app in NSWorkspace.shared.runningApplications {
-                let axApp = AXUIElementCreateApplication(app.processIdentifier)
-                guard let windows = axAttr(axApp, kAXWindowsAttribute) as? [AXUIElement] else { continue }
                 let name = app.localizedName ?? "pid:\(app.processIdentifier)"
-                for window in windows {
-                    buttons.removeAll()
-                    nextID = 0
-                    nodeBudget = Self.maxNodes
-                    guard let tree = buildNode(window, depth: 0) else { continue }
+                for window in tree.windows(ofPID: app.processIdentifier) {
+                    // A permission dialog is a handful of nodes; walking a
+                    // whole Electron window to discover it is not one costs a
+                    // synchronous round trip per node, and used to stall the
+                    // sweep long enough to miss the dialog entirely.
+                    guard let root = tree.build(window, budget: AXTree.dialogNodes, within: 0.3),
+                          !tree.truncated || opts.dump else { continue }
 
                     switch SystemDialogDetector.detect(
-                        root: tree, policy: opts.policy, requireTrigger: opts.requireTrigger
+                        root: root, policy: opts.policy, requireTrigger: opts.requireTrigger
                     ) {
                     case let .dialog(dialog):
                         if opts.dump {
-                            report(tree, appName: name, note: "dialog", force: true)
+                            report(root, appName: name, note: "dialog", force: true)
                             continue
                         }
                         if dialog.fingerprint == handled {
@@ -113,9 +109,9 @@ enum AXScanner {
                         if confirmed { return true }
                     case let .skipped(reason):
                         if opts.dump {
-                            report(tree, appName: name, note: describe(reason), force: true)
+                            report(root, appName: name, note: describe(reason), force: true)
                         } else if opts.verbose, !isNoise(reason) {
-                            report(tree, appName: name, note: describe(reason), force: false)
+                            report(root, appName: name, note: describe(reason), force: false)
                         }
                     }
                 }
@@ -156,11 +152,10 @@ enum AXScanner {
                 Log.info("  [dry-run] pressed nothing")
                 return false
             }
-            guard let element = buttons[target.id] else {
+            guard let err = tree.press(target.id) else {
                 Log.error("  lost the button between scan and press — leaving it")
                 return false
             }
-            let err = AXUIElementPerformAction(element, kAXPressAction as CFString)
             if err == .success {
                 Log.info("  pressed \"\(target.label)\"")
                 return true
@@ -215,40 +210,5 @@ enum AXScanner {
             for child in node.children { walk(child, texts: &texts, labels: &labels) }
         }
 
-        // MARK: - AX tree -> UINode
-
-        /// A trimmed version of `AppWatcher`'s builder: a system dialog carries
-        /// no notification-style custom actions, so buttons are all that can be
-        /// pressed here.
-        private func buildNode(_ el: AXUIElement, depth: Int) -> UINode? {
-            guard depth < Self.maxDepth, nodeBudget > 0 else { return nil }
-            nodeBudget -= 1
-            nextID += 1
-            let id = nextID
-
-            let role = axAttr(el, kAXRoleAttribute) as? String ?? ""
-            let title = axAttr(el, kAXTitleAttribute) as? String ?? ""
-            let desc = axAttr(el, kAXDescriptionAttribute) as? String ?? ""
-            let label = title.isEmpty ? desc : title
-            let text = axAttr(el, kAXValueAttribute) as? String ?? ""
-
-            if role == (kAXButtonRole as String) {
-                buttons[id] = el
-                return UINode(id: id, role: role, label: label, text: text)
-            }
-
-            var children: [UINode] = []
-            if let kids = axAttr(el, kAXChildrenAttribute) as? [AXUIElement] {
-                for kid in kids {
-                    if let node = buildNode(kid, depth: depth + 1) { children.append(node) }
-                }
-            }
-            return UINode(id: id, role: role, label: label, text: text, children: children)
-        }
-
-        private func axAttr(_ el: AXUIElement, _ attr: String) -> CFTypeRef? {
-            var val: CFTypeRef?
-            return AXUIElementCopyAttributeValue(el, attr as CFString, &val) == .success ? val : nil
-        }
     }
 }
