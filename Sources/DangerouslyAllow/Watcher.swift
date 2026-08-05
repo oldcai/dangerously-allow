@@ -64,10 +64,24 @@ final class Watcher {
             Log.info("llm fallback: \(adjudicator.model) will label menus the rules miss")
         }
 
+        var life = PaneLife()
+        var warnedUnreachable = false
         while true {
-            guard channel.paneExists() else {
+            let status = channel.paneStatus()
+            if status == .unknown, !warnedUnreachable {
+                // Worth saying once: the watcher is still on duty, but tmux is
+                // not answering, so it is not seeing prompts either.
+                Log.warn("tmux is not answering — still watching '\(opts.target)'")
+                warnedUnreachable = true
+            }
+            if status == .present { warnedUnreachable = false }
+            if life.shouldStop(after: status) {
                 Log.info("pane '\(opts.target)' is gone — exiting")
                 return
+            }
+            guard status != .gone else {
+                Thread.sleep(forTimeInterval: opts.pollInterval)
+                continue
             }
             do {
                 let screen = try channel.capturePane()

@@ -1,3 +1,4 @@
+import DangerouslyAllowCore
 import Foundation
 
 enum TmuxError: Error, CustomStringConvertible {
@@ -44,27 +45,41 @@ struct TmuxChannel {
         return s.isEmpty ? nil : s
     }
 
-    @discardableResult
-    private func run(_ args: [String]) throws -> String {
+    /// nil when tmux could not be started at all — fork failure under load, a
+    /// binary that vanished mid-session. Distinct from "tmux ran and said no".
+    private func attempt(_ args: [String]) -> (code: Int32, out: String, err: String)? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: tmux)
         p.arguments = args
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err
-        try p.run()
+        do {
+            try p.run()
+        } catch {
+            return nil
+        }
         // Read before waiting so a large pane cannot fill the pipe and deadlock.
         let data = out.fileHandleForReading.readDataToEndOfFile()
         let errData = err.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        guard p.terminationStatus == 0 else {
-            throw TmuxError.failed(
-                args.joined(separator: " "),
-                p.terminationStatus,
-                String(decoding: errData, as: UTF8.self)
-            )
+        return (
+            p.terminationStatus,
+            String(decoding: data, as: UTF8.self),
+            String(decoding: errData, as: UTF8.self)
+        )
+    }
+
+    @discardableResult
+    private func run(_ args: [String]) throws -> String {
+        let joined = args.joined(separator: " ")
+        guard let result = attempt(args) else {
+            throw TmuxError.failed(joined, -1, "could not start tmux")
         }
-        return String(decoding: data, as: UTF8.self)
+        guard result.code == 0 else {
+            throw TmuxError.failed(joined, result.code, result.err)
+        }
+        return result.out
     }
 
     /// Visible contents of the pane, as plain text. Cursor glyphs (`❯`, `●`)
@@ -77,7 +92,11 @@ struct TmuxChannel {
         try run(["send-keys", "-t", target] + keys)
     }
 
-    func paneExists() -> Bool {
-        (try? run(["display-message", "-p", "-t", target, "#{pane_id}"])) != nil
+    /// Asking tmux whether the pane is still there. See `TmuxProbe` for why the
+    /// exit code alone cannot answer that.
+    func paneStatus() -> PaneStatus {
+        let args = ["display-message", "-p", "-t", target, "#{pane_id}"]
+        guard let result = attempt(args) else { return .unknown }
+        return TmuxProbe.classify(exitCode: result.code, stdout: result.out, stderr: result.err)
     }
 }
