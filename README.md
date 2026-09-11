@@ -43,7 +43,7 @@ make uninstall
 secondary terminal-agent mode (`brew install tmux`).
 
 ```bash
-make check                # 99 unit tests + 12 end-to-end tests through real tmux
+make check                # 119 unit tests + 12 end-to-end tests through real tmux
 make help                 # list targets
 ```
 
@@ -378,7 +378,7 @@ and paste the parsed menu into an issue along with the raw
 `tmux capture-pane -p -t <session>` output. New harnesses are usually just a few
 labels in `OptionClassifier` plus a fixture in `RealCaptureTests`.
 
-`make check` must stay green: 99 unit tests, and 12 end-to-end tests that drive a
+`make check` must stay green: 119 unit tests, and 12 end-to-end tests that drive a
 mock TUI through a real tmux pane.
 
 ## License

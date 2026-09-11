@@ -36,9 +36,9 @@ public enum DesktopRoute {
 /// that answer is final — never re-examined as a card, not even when the policy
 /// declines to press anything on it.
 ///
-/// Cards come second, so an app's own approval card keeps the cautious card
-/// policy and its one-shot "Allow once" instead of being answered as if it were
-/// a permanent system grant.
+/// Cards come second, so an app's own explicit "Allow once" keeps the card
+/// policy. An ambiguous plain grant in a small window is the exception: it
+/// may be an unrecognised system dialog, so it uses the dialog ceiling.
 ///
 /// Third is everything else that is shaped like a dialog and has a button that
 /// grants: Chrome's "Allow remote debugging?", an app's own permission sheet,
@@ -61,6 +61,19 @@ public enum DesktopRouter {
         if cardsAllowed, let card = ButtonPromptDetector.detect(
             root: window, policy: policies.card, requireTrigger: requireTrigger
         ) {
+            // Plain "Allow"/"Yes" is only implicitly one-shot in the card
+            // classifier. Without known wording it cannot distinguish a new
+            // TCC sentence from an app card. Fail conservatively for a small
+            // dialog; explicit once/session choices retain their card policy.
+            if !requireTrigger, let target = card.target, target.kind == .allowOnce,
+               !SystemDialogDetector.boundedGrantPhrases.contains(where: {
+                   target.label.lowercased().contains($0)
+               }),
+               case let .dialog(dialog) = SystemDialogDetector.detect(
+                   root: window, policy: policies.dialog, requireTrigger: false
+               ) {
+                return .systemDialog(dialog)
+            }
             return .card(card)
         }
         if !requireTrigger, case let .dialog(dialog) = SystemDialogDetector.detect(

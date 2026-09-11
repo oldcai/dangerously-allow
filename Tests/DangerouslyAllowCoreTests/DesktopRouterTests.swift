@@ -146,6 +146,18 @@ final class DesktopRouterTests: XCTestCase {
         XCTAssertNil(d.target)
     }
 
+    func testUnknownSmallDialogDoesNotBecomeAOneShotCard() {
+        let surface = win([
+            txt("May Example capture sound from your surroundings?"),
+            btn("Don’t Allow"), btn("Allow"),
+        ])
+        guard case let .systemDialog(d) = DesktopRouter.route(
+            window: surface, cardsAllowed: true,
+            policies: DesktopPolicies(dialog: .session, card: .always)
+        ) else { return XCTFail("ambiguous plain Allow must use the dialog ceiling") }
+        XCTAssertNil(d.target)
+    }
+
     /// The shape gate is what the app allowlist used to do: a browser window
     /// carrying a page's Allow/Deny among its own chrome is not dialog-shaped,
     /// and is left alone wherever it appears.
