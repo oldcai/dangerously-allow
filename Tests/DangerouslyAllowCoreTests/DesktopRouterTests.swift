@@ -158,6 +158,20 @@ final class DesktopRouterTests: XCTestCase {
         XCTAssertNil(d.target)
     }
 
+    func testPopupWebDocumentIsNotANativePermissionDialog() {
+        for wording in ["Allow remote debugging?", "May we continue?"] {
+            let popup = win([node("AXWebArea", [
+                txt(wording), btn("Cancel"), btn("Allow"),
+            ])])
+            for requireTrigger in [false, true] {
+                guard case .ignored = DesktopRouter.route(
+                    window: popup, cardsAllowed: false, policies: DesktopPolicies(),
+                    requireTrigger: requireTrigger
+                ) else { return XCTFail("small web popups must not become native grants") }
+            }
+        }
+    }
+
     /// The shape gate is what the app allowlist used to do: a browser window
     /// carrying a page's Allow/Deny among its own chrome is not dialog-shaped,
     /// and is left alone wherever it appears.

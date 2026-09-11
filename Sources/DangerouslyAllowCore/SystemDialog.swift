@@ -162,6 +162,10 @@ public enum SystemDialogDetector {
     /// Buttons are leaves — their wording belongs to the option, not to the
     /// dialog, so `--never-approve` can tell the two apart.
     private static func collect(_ node: UINode, buttons: inout [UINode], texts: inout [String]) {
+        // Original browser windows remain scan candidates after native dialog
+        // discovery. A toolbar-free popup is still a web document, not a TCC
+        // dialog, even when its wording and button count happen to match.
+        guard NativeDialogSurface.shouldDescend(role: node.role) else { return }
         if node.role == "AXButton" {
             buttons.append(node)
             return

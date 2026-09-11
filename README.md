@@ -43,7 +43,7 @@ make uninstall
 secondary terminal-agent mode (`brew install tmux`).
 
 ```bash
-make check                # 119 unit tests + 12 end-to-end tests through real tmux
+make check                # 120 unit tests + 12 end-to-end tests through real tmux
 make help                 # list targets
 ```
 
@@ -72,9 +72,8 @@ web-page dialogs are not promoted to native permission prompts. The remote
 debugging confirmation uses the dialog policy: the default presses **Allow**,
 never **Cancel** or **Turn off in settings**; `--policy session` leaves it alone.
 
-What keeps that off a web page's Allow/Deny buttons is the shape: a browser
-window carries its own toolbar, so it is not a handful of buttons and is left
-alone. Approval *cards* are still only answered in apps on a list — the ChatGPT
+The native-dialog detector skips `AXWebArea` documents, including small popups
+without a browser toolbar. Approval *cards* are still only answered in apps on a list — the ChatGPT
 and Claude desktop apps, and notification banners — so that a card keeps the
 cautious card policy and its one-shot "Allow once". `--app` extends that list,
 by localized name or bundle id.
@@ -378,7 +377,7 @@ and paste the parsed menu into an issue along with the raw
 `tmux capture-pane -p -t <session>` output. New harnesses are usually just a few
 labels in `OptionClassifier` plus a fixture in `RealCaptureTests`.
 
-`make check` must stay green: 119 unit tests, and 12 end-to-end tests that drive a
+`make check` must stay green: 120 unit tests, and 12 end-to-end tests that drive a
 mock TUI through a real tmux pane.
 
 ## License
