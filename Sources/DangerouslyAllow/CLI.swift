@@ -12,8 +12,11 @@ USAGE
   inside the ChatGPT and Claude desktop apps, Allow-style actions on
   notification banners, and the native macOS permission dialogs they trigger on
   the way to controlling your machine ("ChatGPT wants access to control X").
-  Needs this terminal to have Accessibility permission (System Settings →
-  Privacy & Security → Accessibility). No sudo.
+  Anything shaped like a prompt with a button that grants is answered, whatever
+  its wording; several at once are answered in one sweep, and a sweep that
+  pressed something looks again immediately instead of sleeping the poll
+  interval. Needs this terminal to have Accessibility permission (System
+  Settings → Privacy & Security → Accessibility). No sudo.
 
 OPTIONS
   --policy once|session|always   which grant to click  (default: session for
@@ -25,7 +28,7 @@ OPTIONS
   --verbose                      print every option and the tier it was given
   --once                         exit after the first approval
   --poll <ms>                    scan interval                  (default: 500)
-  --no-require-trigger           match prompts whose wording is not recognised
+  --require-trigger              only answer prompts whose wording is recognised
   --notify                       macOS notification when left for a human
 
 ONE CHANNEL AT A TIME
@@ -60,6 +63,7 @@ OPTIONS (watch only)
   --poll <ms>                    capture interval            (default: 400)
   --nav-delay <ms>               pause between arrow keys    (default: 80)
   --no-require-trigger           match menus with no question line above
+                                 (the tmux path still gates on one by default)
 
 LLM FALLBACK
   Only runs when the rule-based classifier does not recognise a menu. The model
@@ -76,7 +80,7 @@ OPTIONS (run only)
 
 OPTIONS (app + notifications)
   --policy / --never-approve / --dry-run / --verbose / --notify / --once /
-  --poll / --no-require-trigger  as above
+  --poll / --require-trigger     as above
   --dump                         print the app's pruned AX tree once and exit
 
   `app <name>` matches a running app by name or bundle id and presses the
@@ -89,7 +93,7 @@ OPTIONS (app + notifications)
 
 OPTIONS (gui)
   --policy / --never-approve / --dry-run / --verbose / --dump / --notify /
-  --once / --poll / --no-require-trigger  as above  (--policy default: always)
+  --once / --poll / --require-trigger  as above  (--policy default: always)
 
   A native permission dialog is answered into the TCC database, so its grant
   outlives the process: a plain "Allow" is a *permanent* grant however mildly
@@ -99,9 +103,12 @@ OPTIONS (gui)
   buttons ("Open System Settings") are never pressed under any policy; pass
   --policy session to press only an explicit "Allow Once". Unlike a card, a
   system dialog need not offer a refusal — macOS 15's screen-capture prompt
-  offers "Allow" and "Open System Settings", and the way out is Esc — so the
-  gate is the dialog's wording plus the policy ceiling. Run --verbose to see
-  the dialogs it passed over and why.
+  offers "Allow" and "Open System Settings", and the way out is Esc — so what
+  gates it is the shape (a handful of buttons), a button that grants, and the
+  policy ceiling. Recognised wording is not required: a keyword list only knows
+  the prompts someone has already transcribed, and Chrome's "Allow remote
+  debugging?" is nobody's TCC sentence. --require-trigger demands it anyway.
+  Run --verbose to see the dialogs it passed over and why.
 
 POLICY
   once     click "Yes" / "Allow once"
@@ -188,6 +195,8 @@ struct CLI {
             case "--dry-run": opts.dryRun = true
             case "--once": opts.stopAfterFirst = true
             case "--verbose", "-v": opts.verbose = true
+            case "--require-trigger": opts.requireTrigger = true
+            // Kept so existing invocations keep working: it now names the default.
             case "--no-require-trigger": opts.requireTrigger = false
             case "--never-approve": opts.neverApprove.append(take(args, &i, "--never-approve"))
             case "--poll": opts.pollInterval = (Double(take(args, &i, "--poll")) ?? 500) / 1000
@@ -243,6 +252,8 @@ struct CLI {
             case "--dry-run": opts.dryRun = true
             case "--once": opts.stopAfterFirst = true
             case "--verbose", "-v": opts.verbose = true
+            case "--require-trigger": opts.requireTrigger = true
+            // Kept so existing invocations keep working: it now names the default.
             case "--no-require-trigger": opts.requireTrigger = false
             case "--never-approve": opts.neverApprove.append(take(args, &i, "--never-approve"))
             case "--poll": opts.pollInterval = (Double(take(args, &i, "--poll")) ?? 400) / 1000
@@ -283,6 +294,8 @@ struct CLI {
             case "--once": opts.stopAfterFirst = true
             case "--verbose", "-v": opts.verbose = true
             case "--dump": opts.dump = true
+            case "--require-trigger": opts.requireTrigger = true
+            // Kept so existing invocations keep working: it now names the default.
             case "--no-require-trigger": opts.requireTrigger = false
             case "--never-approve": opts.neverApprove.append(take(args, &i, "--never-approve"))
             case "--poll": opts.pollInterval = (Double(take(args, &i, "--poll")) ?? 500) / 1000
@@ -328,6 +341,8 @@ struct CLI {
             case "--dry-run": opts.dryRun = true
             case "--once": opts.stopAfterFirst = true
             case "--verbose", "-v": opts.verbose = true
+            case "--require-trigger": opts.requireTrigger = true
+            // Kept so existing invocations keep working: it now names the default.
             case "--no-require-trigger": opts.requireTrigger = false
             case "--never-approve": opts.neverApprove.append(take(args, &i, "--never-approve"))
             case "--poll": opts.pollInterval = (Double(take(args, &i, "--poll")) ?? 500) / 1000

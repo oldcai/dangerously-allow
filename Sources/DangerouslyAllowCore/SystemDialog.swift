@@ -77,6 +77,11 @@ public enum SystemDialogDetector {
         "access your screen", "record your screen", "system audio",
         // Two more that lead with a verb the frames above do not cover.
         "devices on your local network", "send you notifications",
+        // Chrome's own remote-debugging dialog, which is not a TCC dialog at
+        // all: an app wrote this sentence, so it matches none of the system
+        // frames above. "An external app wants full control over this Chrome
+        // session to debug it."
+        "wants full control", "full control over", "remote debugging",
         // Dialogs that lead with the service name instead of a sentence.
         "microphone", "camera", "screen recording", "accessibility",
         "speech recognition", "input monitoring", "full disk access",
@@ -100,8 +105,15 @@ public enum SystemDialogDetector {
         return .allowAlways
     }
 
+    /// `requireTrigger` gates on the wording list above. The watchers leave it
+    /// off: the list is transcribed from dialogs that shipped, so it only ever
+    /// knows the past, and every sentence it has not met yet — Chrome's
+    /// remote-debugging dialog, the next OS release's rephrasing — is silently
+    /// walked past with no trace in the log. Off, the gate that remains is the
+    /// shape (a handful of buttons) and the classifier (something on it has to
+    /// grant), which is what the policy ceiling was written to stand on.
     public static func detect(
-        root: UINode, policy: AllowPolicy, requireTrigger: Bool = true
+        root: UINode, policy: AllowPolicy, requireTrigger: Bool = false
     ) -> SystemDialogScan {
         var buttons: [UINode] = []
         var texts: [String] = []

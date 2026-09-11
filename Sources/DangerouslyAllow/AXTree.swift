@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import DangerouslyAllowCore
 
@@ -86,7 +87,44 @@ final class AXTree {
     func windows(ofPID pid: pid_t) -> [AXUIElement] {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, Self.messagingTimeout)
-        return attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] ?? []
+        let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? ""
+        guard ["com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev",
+               "com.google.Chrome.canary", "org.chromium.Chromium"].contains(bundleID)
+        else { return windows }
+
+        // Chrome's native confirmation may be a group/sheet inside the browser
+        // window, not a separate AXWindow. Scan it independently before the
+        // toolbar/page can exhaust the normal dialog budget. Keep live handles;
+        // each subsequent build still creates its own fresh press table.
+        var dialogs: [AXUIElement] = []
+        var remaining = Self.dialogNodes
+        let deadline = Date(timeIntervalSinceNow: 0.2)
+        for window in windows {
+            findNativeDialogs(window, depth: 0, remaining: &remaining,
+                              deadline: deadline, into: &dialogs)
+        }
+        return dialogs + windows
+    }
+
+    private func findNativeDialogs(
+        _ element: AXUIElement, depth: Int, remaining: inout Int,
+        deadline: Date, into dialogs: inout [AXUIElement]
+    ) {
+        guard depth < Self.maxDepth, remaining > 0, Date() < deadline else { return }
+        remaining -= 1
+        let role = attribute(element, kAXRoleAttribute) as? String ?? ""
+        guard NativeDialogSurface.shouldDescend(role: role) else { return }
+        let subrole = attribute(element, kAXSubroleAttribute) as? String ?? ""
+        if NativeDialogSurface.isDialog(role: role, subrole: subrole) {
+            dialogs.append(element)
+            return
+        }
+        for child in attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? [] {
+            guard remaining > 0, Date() < deadline else { break }
+            findNativeDialogs(child, depth: depth + 1, remaining: &remaining,
+                              deadline: deadline, into: &dialogs)
+        }
     }
 
     // MARK: - internals

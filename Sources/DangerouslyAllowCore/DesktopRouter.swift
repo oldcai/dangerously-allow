@@ -26,34 +26,49 @@ public enum DesktopRoute {
 
 /// Decides which detector owns a window, for the single-process desktop mode.
 ///
-/// The order is a safety rule, not a preference. A TCC dialog belonging to a
-/// watched app — "“ChatGPT” wants access to control “FastMD”" is a window of
-/// ChatGPT — satisfies `ButtonPromptDetector`'s grant-and-refusal invariant
-/// just as well as an approval card does, and that detector reads a plain
-/// "Allow" as `.allowOnce`. Routed there, the cautious card policy would press
-/// a permanent system grant believing it was a one-shot. So the system-dialog
-/// detector is asked first and its answer is final: a window it claims is never
-/// re-examined as a card, not even when its policy declines to press anything.
+/// Three tiers, and the first is a safety rule rather than a preference. A TCC
+/// dialog belonging to a watched app — "“ChatGPT” wants access to control
+/// “FastMD”" is a window of ChatGPT — satisfies `ButtonPromptDetector`'s
+/// grant-and-refusal invariant just as well as an approval card does, and that
+/// detector reads a plain "Allow" as `.allowOnce`. Routed there, the cautious
+/// card policy would press a permanent system grant believing it was a
+/// one-shot. So a dialog whose *wording* is recognised is claimed first, and
+/// that answer is final — never re-examined as a card, not even when the policy
+/// declines to press anything on it.
+///
+/// Cards come second, so an app's own approval card keeps the cautious card
+/// policy and its one-shot "Allow once" instead of being answered as if it were
+/// a permanent system grant.
+///
+/// Third is everything else that is shaped like a dialog and has a button that
+/// grants: Chrome's "Allow remote debugging?", an app's own permission sheet,
+/// the next OS release's rephrasing of a sentence the keyword list knows in its
+/// old form. It is last because it is the loosest, and it is present at all
+/// because a wording list only knows the prompts it has already met. Arming
+/// `requireTrigger` removes this tier.
 public enum DesktopRouter {
     public static func route(
         window: UINode,
         cardsAllowed: Bool,
         policies: DesktopPolicies,
-        requireTrigger: Bool = true
+        requireTrigger: Bool = false
     ) -> DesktopRoute {
-        switch SystemDialogDetector.detect(
-            root: window, policy: policies.dialog, requireTrigger: requireTrigger
+        if case let .dialog(dialog) = SystemDialogDetector.detect(
+            root: window, policy: policies.dialog, requireTrigger: true
         ) {
-        case let .dialog(dialog):
             return .systemDialog(dialog)
-        case .skipped:
-            guard cardsAllowed,
-                  let card = ButtonPromptDetector.detect(
-                      root: window, policy: policies.card, requireTrigger: requireTrigger
-                  )
-            else { return .ignored }
+        }
+        if cardsAllowed, let card = ButtonPromptDetector.detect(
+            root: window, policy: policies.card, requireTrigger: requireTrigger
+        ) {
             return .card(card)
         }
+        if !requireTrigger, case let .dialog(dialog) = SystemDialogDetector.detect(
+            root: window, policy: policies.dialog, requireTrigger: false
+        ) {
+            return .systemDialog(dialog)
+        }
+        return .ignored
     }
 }
 
