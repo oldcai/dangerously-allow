@@ -80,6 +80,9 @@ final class DesktopRouterTests: XCTestCase {
 
     // MARK: - cards
 
+    /// Cards keep their own path even with the wording gate off, so an app's
+    /// approval card is answered with the cautious card policy — "Allow once" —
+    /// rather than as a permanent system grant.
     func testCardInAWatchedAppIsRouted() {
         guard case let .card(c) = DesktopRouter.route(
             window: browserUseCard(), cardsAllowed: true, policies: DesktopPolicies()
@@ -87,12 +90,106 @@ final class DesktopRouterTests: XCTestCase {
         XCTAssertEqual(c.target?.label, "Allow once", "cards default to the cautious grant")
     }
 
-    /// The app allowlist is the safety boundary for cards: a web page with
-    /// Allow/Deny buttons in some unrelated browser is not ours to answer.
-    func testCardInAnUnwatchedAppIsIgnored() {
-        guard case .ignored = DesktopRouter.route(
+    /// Outside the watched apps there is no card path, so a window this small
+    /// with a button that grants falls to the lenient dialog tier and is
+    /// answered — the point of "if it is a prompt, allow it". What keeps this
+    /// off a web page's Allow/Deny is the shape gate below, not an app list.
+    func testDialogShapedWindowInAnUnwatchedAppIsAnswered() {
+        guard case let .systemDialog(d) = DesktopRouter.route(
             window: browserUseCard(), cardsAllowed: false, policies: DesktopPolicies()
-        ) else { return XCTFail("cards outside the watched apps must be left alone") }
+        ) else { return XCTFail("a small window offering a grant is a prompt") }
+        XCTAssertNotNil(d.target)
+    }
+
+    /// Chrome's remote-debugging wording is recognised even outside the app list.
+    func testChromeRemoteDebuggingDialogIsAnswered() {
+        let dialog = win([
+            txt("Allow remote debugging?"),
+            txt("An external app wants full control over this Chrome session to debug it."),
+            btn("Turn off in settings"), btn("Cancel"), btn("Allow"),
+        ])
+        guard case let .systemDialog(d) = DesktopRouter.route(
+            window: dialog, cardsAllowed: false, policies: DesktopPolicies()
+        ) else { return XCTFail("Chrome's dialog must be answered") }
+        XCTAssertEqual(d.target?.label, "Allow")
+    }
+
+    func testChromeNativeDialogSurfaceWithStrictWordingGate() {
+        // AXTree supplies the native dialog group separately from the toolbar.
+        let surface = grp([
+            txt("Allow remote debugging?"),
+            txt("An external app wants full control over this Chrome session to debug it."),
+            btn("Turn off in settings"), btn("Cancel"), btn("Allow"),
+        ])
+        for cardsAllowed in [false, true] {
+            guard case let .systemDialog(d) = DesktopRouter.route(
+                window: surface, cardsAllowed: cardsAllowed,
+                policies: DesktopPolicies(), requireTrigger: true
+            ) else { return XCTFail("native Chrome dialog must use the dialog policy") }
+            XCTAssertEqual(d.target?.label, "Allow")
+            XCTAssertEqual(d.options.filter { $0.kind.grantsAccess }.map(\.label), ["Allow"])
+            XCTAssertNotNil(PromptDetector.blockingPattern(
+                screen: d.fullText, neverApprove: ["remote debugging"]
+            ))
+        }
+    }
+
+    func testChromeDialogDoesNotBypassExplicitCautiousPolicy() {
+        let surface = grp([
+            txt("Allow remote debugging?"),
+            btn("Turn off in settings"), btn("Cancel"), btn("Allow"),
+        ])
+        guard case let .systemDialog(d) = DesktopRouter.route(
+            window: surface, cardsAllowed: true,
+            policies: DesktopPolicies(dialog: .session, card: .always)
+        ) else { return XCTFail("must not fall through to the card channel") }
+        XCTAssertNil(d.target)
+    }
+
+    func testUnknownSmallDialogDoesNotBecomeAOneShotCard() {
+        let surface = win([
+            txt("May Example capture sound from your surroundings?"),
+            btn("Don’t Allow"), btn("Allow"),
+        ])
+        guard case let .systemDialog(d) = DesktopRouter.route(
+            window: surface, cardsAllowed: true,
+            policies: DesktopPolicies(dialog: .session, card: .always)
+        ) else { return XCTFail("ambiguous plain Allow must use the dialog ceiling") }
+        XCTAssertNil(d.target)
+    }
+
+    func testPopupWebDocumentIsNotANativePermissionDialog() {
+        for wording in ["Allow remote debugging?", "May we continue?"] {
+            let popup = win([node("AXWebArea", [
+                txt(wording), btn("Cancel"), btn("Allow"),
+            ])])
+            for requireTrigger in [false, true] {
+                guard case .ignored = DesktopRouter.route(
+                    window: popup, cardsAllowed: false, policies: DesktopPolicies(),
+                    requireTrigger: requireTrigger
+                ) else { return XCTFail("small web popups must not become native grants") }
+            }
+        }
+    }
+
+    /// The shape gate is what the app allowlist used to do: a browser window
+    /// carrying a page's Allow/Deny among its own chrome is not dialog-shaped,
+    /// and is left alone wherever it appears.
+    func testWindowFullOfButtonsIsIgnoredEvenWithAGrantOnIt() {
+        var kids: [UINode] = [txt("Allow notifications?"), btn("Allow"), btn("Block")]
+        kids += (1...8).map { btn("Toolbar \($0)") }
+        guard case .ignored = DesktopRouter.route(
+            window: win(kids), cardsAllowed: false, policies: DesktopPolicies()
+        ) else { return XCTFail("a window full of buttons is not a prompt") }
+    }
+
+    /// `--require-trigger` puts the old boundary back: no lenient tier, and
+    /// cards only in the watched apps.
+    func testArmingTheGateRestoresTheWordingBoundary() {
+        guard case .ignored = DesktopRouter.route(
+            window: browserUseCard(), cardsAllowed: false,
+            policies: DesktopPolicies(), requireTrigger: true
+        ) else { return XCTFail("--require-trigger must restore the old boundary") }
     }
 
     /// Notification banners expose their buttons as AX *actions*, which the

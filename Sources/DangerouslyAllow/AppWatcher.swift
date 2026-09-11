@@ -11,7 +11,9 @@ struct AppWatchOptions {
     var stopAfterFirst = false
     var pollInterval: TimeInterval = 0.5
     var neverApprove: [String] = []
-    var requireTrigger = true
+    /// Gate cards on recognised wording — see `DesktopOptions`. Off by
+    /// default; `--require-trigger` puts it back.
+    var requireTrigger = false
     var verbose = false
     var notify = false
     /// Print each window's pruned AX tree once and exit — for capturing the
@@ -31,9 +33,10 @@ struct AppWatchOptions {
 /// tree builder surfaces each non-standard action as a synthetic pressable.
 final class AppWatcher {
     private let opts: AppWatchOptions
-    /// Fingerprint of the card we already acted on, cleared once it leaves the
-    /// screen — the same lingering-frame guard `Watcher` uses.
-    private var handled: String?
+    /// Fingerprints already acted on, pruned each sweep to whatever is still on
+    /// screen — the same lingering-frame guard `Watcher` uses, as a set so that
+    /// several cards up at once do not make each other forgotten.
+    private var handled: Set<String> = []
 
     private let tree = AXTree()
 
@@ -62,7 +65,11 @@ final class AppWatcher {
                 }
             } else {
                 warnedNotRunning = false
-                if scan(apps), opts.stopAfterFirst { return }
+                let pressed = scan(apps)
+                if pressed, opts.stopAfterFirst { return }
+                // A card often has another behind it; do not sleep out the poll
+                // interval before looking.
+                if pressed, !opts.dump { continue }
             }
             if opts.dump { return }
             Thread.sleep(forTimeInterval: opts.pollInterval)
@@ -71,9 +78,10 @@ final class AppWatcher {
 
     // MARK: - one poll
 
-    /// Returns true when a card was confirmed this pass.
+    /// Presses every card this pass finds. Returns true when it pressed any.
     private func scan(_ apps: [NSRunningApplication]) -> Bool {
-        var sawHandled = false
+        var seen: Set<String> = []
+        var pressed = false
         for app in apps {
             for window in tree.windows(ofPID: app.processIdentifier) {
                 guard let root = tree.build(window, within: 1.5) else { continue }
@@ -85,23 +93,20 @@ final class AppWatcher {
                 guard let prompt = ButtonPromptDetector.detect(
                     root: root, policy: opts.policy, requireTrigger: opts.requireTrigger
                 ) else { continue }
-                if prompt.fingerprint == handled {
-                    sawHandled = true
-                    continue
+                seen.insert(prompt.fingerprint)
+                guard handled.insert(prompt.fingerprint).inserted else { continue }
+                if handle(prompt, appName: app.localizedName ?? opts.appName) {
+                    pressed = true
+                    if opts.stopAfterFirst { return true }
                 }
-                let confirmed = handle(prompt, appName: app.localizedName ?? opts.appName)
-                sawHandled = true
-                if confirmed { return true }
             }
         }
-        if !sawHandled { handled = nil }
-        return false
+        handled.formIntersection(seen)
+        return pressed
     }
 
     /// Returns true when the card was confirmed.
     private func handle(_ prompt: DetectedButtonPrompt, appName: String) -> Bool {
-        handled = prompt.fingerprint
-
         if let blocked = PromptDetector.blockingPattern(
             screen: prompt.fullText, neverApprove: opts.neverApprove
         ) {

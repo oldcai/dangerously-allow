@@ -12,7 +12,9 @@ struct GuiWatchOptions {
     var stopAfterFirst = false
     var pollInterval: TimeInterval = 0.5
     var neverApprove: [String] = []
-    var requireTrigger = true
+    /// Gate dialogs on recognised wording — see `DesktopOptions`. Off by
+    /// default; `--require-trigger` puts it back.
+    var requireTrigger = false
     /// Log every dialog-shaped window and why it was passed over — for
     /// diagnosing wording the keyword list does not know yet.
     var verbose = false
@@ -53,8 +55,14 @@ enum AXScanner {
 
         let scanner = Scan(options: options)
         while true {
-            if scanner.pass(), options.stopAfterFirst { return }
+            let pressed = scanner.pass()
+            if pressed, options.stopAfterFirst { return }
             if options.dump { return }
+            // Dialogs queue: dismissing one uncovers the next, and an app that
+            // wants three permissions asks three times. Sleeping the poll
+            // interval between them is the whole of the wait, so a pass that
+            // pressed something goes straight back round instead.
+            if pressed { continue }
             Thread.sleep(forTimeInterval: options.pollInterval)
         }
     }
@@ -65,10 +73,35 @@ enum AXScanner {
     }
 
     private final class Scan {
+        /// A dialog is frontmost, and its app is normally the active one, so
+        /// the sweep starts there and presses as it goes — the alternative is
+        /// answering it only after 128 other apps have been asked about their
+        /// windows, which measured at two to five seconds.
+        private static func rank(_ app: NSRunningApplication, lastAnswered: pid_t) -> Int {
+            if app.processIdentifier == lastAnswered { return 0 }
+            if app.isActive { return 1 }
+            switch app.activationPolicy {
+            case .regular: return 2
+            case .accessory: return 3
+            default: return 4
+            }
+        }
+
+        /// Ceiling on one app's whole window list. Finder alone spent over two
+        /// seconds of a sweep on windows that were never going to be dialogs,
+        /// and a dialog is at the front of the list anyway.
+        private static let perAppWalk: TimeInterval = 0.6
+
         private let opts: GuiWatchOptions
-        /// Fingerprint of the dialog already acted on, cleared once it leaves
-        /// the screen — the lingering-frame guard `AppWatcher` uses too.
-        private var handled: String?
+        /// The app the last dialog was answered in, swept first next time:
+        /// prompts queue, and the next one is nearly always from the same app.
+        private var lastAnswered: pid_t = -1
+        /// Fingerprints already acted on, pruned each sweep to whatever is
+        /// still on screen — a dialog lingers for a frame or two after it is
+        /// pressed, and re-pressing it would answer the *next* one by accident.
+        /// A set rather than one slot: with several dialogs up at once, a
+        /// single slot forgets the first as soon as the second is pressed.
+        private var handled: Set<String> = []
         /// Windows already reported under --verbose, so a 2 Hz poll does not
         /// reprint the same unrecognised dialog forever.
         private var reported: Set<String> = []
@@ -78,13 +111,39 @@ enum AXScanner {
             self.opts = options
         }
 
-        /// One sweep of every window of every running app. Returns true when a
-        /// dialog was confirmed.
+        /// One sweep of every window of every running app. Presses every
+        /// dialog it finds — stopping at the first would make a queue of them
+        /// drain one poll interval at a time. Returns true when it pressed
+        /// anything.
         func pass() -> Bool {
-            var sawHandled = false
-            for app in NSWorkspace.shared.runningApplications {
+            var seen: Set<String> = []
+            var pressed = false
+            let started = Date()
+            var scanned = 0
+            defer {
+                if opts.verbose {
+                    Log.info("swept \(scanned) apps in "
+                        + String(format: "%.1f", Date().timeIntervalSince(started)) + "s")
+                }
+            }
+            let order = NSWorkspace.shared.runningApplications.sorted {
+                Self.rank($0, lastAnswered: lastAnswered) < Self.rank($1, lastAnswered: lastAnswered)
+            }
+            for app in order {
+                scanned += 1
                 let name = app.localizedName ?? "pid:\(app.processIdentifier)"
+                let appStarted = Date()
+                let appDeadline = Date(timeIntervalSinceNow: Self.perAppWalk)
+                defer {
+                    let cost = Date().timeIntervalSince(appStarted)
+                    if opts.verbose, cost > 0.2 {
+                        Log.info("  slow: \(name) took " + String(format: "%.1f", cost) + "s")
+                    }
+                }
                 for window in tree.windows(ofPID: app.processIdentifier) {
+                    // Windows come front-to-back, so a dialog is at the top of
+                    // the list; the tail is what runs the clock down.
+                    if Date() >= appDeadline, !opts.dump { break }
                     // A permission dialog is a handful of nodes; walking a
                     // whole Electron window to discover it is not one costs a
                     // synchronous round trip per node, and used to stall the
@@ -100,13 +159,13 @@ enum AXScanner {
                             report(root, appName: name, note: "dialog", force: true)
                             continue
                         }
-                        if dialog.fingerprint == handled {
-                            sawHandled = true
-                            continue
+                        seen.insert(dialog.fingerprint)
+                        guard handled.insert(dialog.fingerprint).inserted else { continue }
+                        if handle(dialog, appName: name) {
+                            pressed = true
+                            lastAnswered = app.processIdentifier
+                            if opts.stopAfterFirst { return true }
                         }
-                        let confirmed = handle(dialog, appName: name)
-                        sawHandled = true
-                        if confirmed { return true }
                     case let .skipped(reason):
                         if opts.dump {
                             report(root, appName: name, note: describe(reason), force: true)
@@ -116,14 +175,12 @@ enum AXScanner {
                     }
                 }
             }
-            if !sawHandled { handled = nil }
-            return false
+            handled.formIntersection(seen)
+            return pressed
         }
 
         /// Returns true when the dialog was confirmed.
         private func handle(_ dialog: DetectedSystemDialog, appName: String) -> Bool {
-            handled = dialog.fingerprint
-
             if let blocked = PromptDetector.blockingPattern(
                 screen: dialog.fullText, neverApprove: opts.neverApprove
             ) {

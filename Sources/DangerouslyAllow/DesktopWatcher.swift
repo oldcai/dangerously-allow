@@ -11,7 +11,10 @@ struct DesktopOptions {
     var stopAfterFirst = false
     var pollInterval: TimeInterval = 0.5
     var neverApprove: [String] = []
-    var requireTrigger = true
+    /// Gate prompts on recognised wording. Off: a wording list only knows
+    /// the prompts it has already met, and the ones it has not are walked
+    /// past in silence. `--require-trigger` puts it back.
+    var requireTrigger = false
     var verbose = false
     var notify = false
 }
@@ -38,6 +41,30 @@ final class DesktopWatcher {
     /// an app that would not answer a press either.
     private static let cardWalk: TimeInterval = 1.5
     private static let dialogWalk: TimeInterval = 0.3
+    /// Ceiling on one app's whole window list. Finder alone spent over two
+    /// seconds of a sweep on windows that were never going to be prompts, and
+    /// a prompt is at the front of the list anyway. Card apps get room: their
+    /// card really is buried, and there are only ever a few of them.
+    private static let perAppWalk: TimeInterval = 0.6
+    private static let perCardAppWalk: TimeInterval = 4
+
+    /// A prompt is frontmost, and its app is normally the active one, so the
+    /// sweep starts there and presses as it goes — the alternative is answering
+    /// it only after 128 other apps have been asked about their windows, which
+    /// measured at two to five seconds.
+    private static func rank(_ app: NSRunningApplication, lastAnswered: pid_t) -> Int {
+        if app.processIdentifier == lastAnswered { return 0 }
+        if app.isActive { return 1 }
+        switch app.activationPolicy {
+        case .regular: return 2
+        case .accessory: return 3
+        default: return 4
+        }
+    }
+
+    /// The app the last prompt was answered in, swept first next time: prompts
+    /// queue, and the next one is nearly always from the same app.
+    private var lastAnswered: pid_t = -1
 
     init(options: DesktopOptions) {
         self.opts = options
@@ -76,16 +103,25 @@ final class DesktopWatcher {
         Log.info("Ctrl+C to stop")
 
         while true {
-            if pass(), opts.stopAfterFirst { return }
+            let pressed = pass()
+            if pressed, opts.stopAfterFirst { return }
+            // Prompts queue: dismissing one uncovers the next, and an app that
+            // wants three permissions asks three times. Sleeping the poll
+            // interval between them is the whole of the wait, so a pass that
+            // pressed something goes straight back round instead.
+            if pressed { continue }
             Thread.sleep(forTimeInterval: opts.pollInterval)
         }
     }
 
     // MARK: - one poll
 
-    /// Returns true when something was confirmed this pass.
+    /// One sweep of every window of every running app. Presses every prompt it
+    /// finds — stopping at the first would make a queue of them drain one poll
+    /// interval at a time. Returns true when it pressed anything.
     private func pass() -> Bool {
         var seen: Set<String> = []
+        var pressed = false
         let started = Date()
         var apps = 0
         var windows = 0
@@ -95,7 +131,10 @@ final class DesktopWatcher {
                 Log.info("swept \(apps) apps, \(windows) windows in \(elapsed)s")
             }
         }
-        for app in NSWorkspace.shared.runningApplications {
+        let order = NSWorkspace.shared.runningApplications.sorted {
+            Self.rank($0, lastAnswered: lastAnswered) < Self.rank($1, lastAnswered: lastAnswered)
+        }
+        for app in order {
             apps += 1
             let appStarted = Date()
             defer {
@@ -108,7 +147,13 @@ final class DesktopWatcher {
             let cardsAllowed = AgentApps.isWatched(
                 name: app.localizedName, bundleID: app.bundleIdentifier, in: opts.apps
             )
+            let appDeadline = Date(
+                timeIntervalSinceNow: cardsAllowed ? Self.perCardAppWalk : Self.perAppWalk
+            )
             for window in tree.windows(ofPID: app.processIdentifier) {
+                // Windows come front-to-back, so a prompt is at the top of the
+                // list; the tail is what runs the clock down.
+                if Date() >= appDeadline { break }
                 windows += 1
                 // Only the apps we answer cards in are worth walking in full.
                 // Everywhere else we are looking for a system dialog, which is
@@ -127,11 +172,15 @@ final class DesktopWatcher {
 
                 seen.insert(answer.fingerprint)
                 guard handled.insert(answer.fingerprint).inserted else { continue }
-                if handle(answer, appName: app.localizedName ?? "?") { return true }
+                if handle(answer, appName: app.localizedName ?? "?") {
+                    pressed = true
+                    lastAnswered = app.processIdentifier
+                    if opts.stopAfterFirst { return true }
+                }
             }
         }
         handled.formIntersection(seen)
-        return false
+        return pressed
     }
 
     private func answer(for window: UINode, cardsAllowed: Bool) -> Answer? {

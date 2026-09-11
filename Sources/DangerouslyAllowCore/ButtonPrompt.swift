@@ -68,8 +68,12 @@ public enum ButtonPromptDetector {
         "approve", "run",
     ]
 
+    /// `requireTrigger` gates on `triggerKeywords`. Off by default, for the
+    /// reason `SystemDialogDetector.detect` gives: a wording list only knows
+    /// the prompts it has already met. A card still has to be a small subtree
+    /// offering both a grant and a refusal, inside an app on the watch list.
     public static func detect(
-        root: UINode, policy: AllowPolicy, requireTrigger: Bool = true
+        root: UINode, policy: AllowPolicy, requireTrigger: Bool = false
     ) -> DetectedButtonPrompt? {
         var memo: [Int: Analysis] = [:]
         analyze(root, into: &memo)

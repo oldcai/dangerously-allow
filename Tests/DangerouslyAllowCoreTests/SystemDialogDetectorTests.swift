@@ -183,6 +183,78 @@ final class SystemDialogDetectorTests: XCTestCase {
         XCTAssertEqual(detect(noOnce, policy: .always)?.target?.label, "Allow While Using App")
     }
 
+    // MARK: - dialogs an app wrote itself
+
+    /// Chrome's remote-debugging dialog, verbatim. Not a TCC dialog: Chrome
+    /// wrote the sentence, so it matches none of the system frames — which is
+    /// exactly how it slipped past a keyword list transcribed from macOS.
+    private func chromeRemoteDebuggingDialog() -> UINode {
+        win([
+            txt("Allow remote debugging?"),
+            txt("An external app wants full control over this Chrome session to debug it. "
+                + "This includes access to your saved data, cookies and site data, and the "
+                + "ability to navigate to any URL."),
+            txt("Only web developers should turn on this feature and only use it with "
+                + "trusted apps."),
+            btn("Turn off in settings"),
+            btn("Cancel"),
+            btn("Allow"),
+        ])
+    }
+
+    func testRecognisesChromeRemoteDebuggingDialog() {
+        let d = detect(chromeRemoteDebuggingDialog(), policy: .always)
+        XCTAssertEqual(d?.target?.label, "Allow")
+    }
+
+    /// Even with the wording gate armed, which it no longer is by default.
+    func testChromeWordingIsInTheKeywordList() {
+        let d = detect(chromeRemoteDebuggingDialog(), policy: .always, requireTrigger: true)
+        XCTAssertNotNil(d, "\"wants full control\" must be recognised wording")
+    }
+
+    /// The other two buttons stay unpressable however the policy is set: one
+    /// refuses, and one opens a settings pane rather than answering anything.
+    func testChromeDialogRefusalsAreNeverPressed() {
+        let d = detect(chromeRemoteDebuggingDialog(), policy: .always)
+        let kinds = Dictionary(uniqueKeysWithValues: (d?.options ?? []).map { ($0.label, $0.kind) })
+        XCTAssertEqual(kinds["Cancel"], .deny)
+        XCTAssertEqual(kinds["Turn off in settings"], .neutral)
+    }
+
+    // MARK: - the wording gate is opt-in
+
+    /// The default. A wording list only knows the prompts it has already met,
+    /// so gating on it means every sentence nobody has transcribed yet is
+    /// walked past in silence. Off, what still has to hold is the shape and a
+    /// button that grants something.
+    func testUnknownWordingIsRecognisedByDefault() {
+        let invented = win([
+            txt("Grant this helper the run of your calendar?"),
+            btn("Allow"),
+            btn("Cancel"),
+        ])
+        guard case let .dialog(d) = SystemDialogDetector.detect(root: invented, policy: .always)
+        else { return XCTFail("the wording gate must be off by default") }
+        XCTAssertEqual(d.target?.label, "Allow")
+    }
+
+    /// Off does not mean "press anything": a window with nothing that grants is
+    /// still skipped, and so is one that is not dialog-shaped.
+    func testLenientDefaultStillNeedsAGrantAndADialogShape() {
+        let noGrant = win([txt("Something went wrong."), btn("Open System Settings")])
+        guard case let .skipped(reason) = SystemDialogDetector.detect(
+            root: noGrant, policy: .always
+        ) else { return XCTFail("expected a skip") }
+        XCTAssertEqual(reason, .noGrant)
+
+        var kids: [UINode] = [txt("would like to access the Microphone")]
+        kids += (1...9).map { btn("Button \($0)") }
+        guard case let .skipped(shape) = SystemDialogDetector.detect(root: win(kids), policy: .always)
+        else { return XCTFail("expected a skip") }
+        XCTAssertEqual(shape, .notADialog(buttons: 9))
+    }
+
     // MARK: - not firing on the wrong thing
 
     func testOrdinaryWindowWithManyButtonsIsNotADialog() {
